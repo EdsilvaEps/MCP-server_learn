@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gnews": {
+      "command": "python",
+      "args": ["/Users/llm-plaground/Documents/MCP-server_learn/news_mcp_server/main.py"],
+      "env": {
+        "GNEWS_API_KEY": "YOUR_GNEWS_API_KEY"
+      }
+    }
+  }
+}
