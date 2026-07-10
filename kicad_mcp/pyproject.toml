@@ -1,0 +1,16 @@
+[project]
+name = "kicad-erc-mcp"
+version = "0.1.0"
+description = "MCP server that wraps kicad-cli sch erc"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.13.1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
