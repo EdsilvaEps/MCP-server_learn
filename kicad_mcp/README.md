@@ -1,13 +1,14 @@
-# KiCad ERC MCP Server
+# KiCad Schematic MCP Server
 
-This package exposes a FastMCP tool that shells out to `kicad-cli sch erc`, validates the provided schematic path, and returns normalized ERC results as structured JSON.
+This package exposes FastMCP tools that shell out to `kicad-cli` for schematic validation and export workflows, including ERC checks, schematic exports such as BOM, netlist, PDF, PNG, DXF, and HPGL, and project scaffolding for new KiCad projects.
 
 ## Features
 
 - Validates that the input path exists and points to a supported schematic file (`.kicad_sch` or `.sch`)
 - Validates the file format before invoking KiCad
-- Captures the JSON/text report emitted by `kicad-cli`
-- Normalizes ERC findings into structured `errors`, `warnings`, and summary data
+- Runs ERC checks and returns normalized `errors`, `warnings`, and summary data
+- Exports schematics to BOM, netlist, PDF, PNG, DXF, and HPGL formats through `kicad-cli`
+- Creates a new KiCad project skeleton with empty schematic, PCB, symbol library, and footprint library files
 
 ## Usage
 
@@ -19,9 +20,29 @@ pip install -e .
 python main.py
 ```
 
-The MCP tool exposed is:
+The MCP tools exposed are:
 
 - `run_erc(schematic_path, format="json", severity_all=False, severity_error=False, severity_warning=False, severity_exclusions=False)`
+- `export_bom(schematic_path, output_path=None, variant=None, preset=None, format_preset=None, fields=None, labels=None, group_by=None, sort_field=None, sort_asc=False, filter=None, exclude_dnp=False, field_delimiter=None, string_delimiter=None, ref_delimiter=None, ref_range_delimiter=None, keep_tabs=False, keep_line_breaks=False)`
+- `export_netlist(schematic_path, output_path=None, format=None, variant=None)`
+- `export_pdf(schematic_path, output_path=None, drawing_sheet=None, variant=None, theme=None, black_and_white=False, exclude_drawing_sheet=False, default_font=None, draw_hop_over=False, exclude_pdf_property_popups=False, exclude_pdf_hierarchical_links=False, exclude_pdf_metadata=False, no_background_color=False, pages=None)`
+- `export_svg(schematic_path, output_path=None, drawing_sheet=None, variant=None, theme=None, black_and_white=False, exclude_drawing_sheet=False, default_font=None, draw_hop_over=False, no_background_color=False, pages=None)`
+- `export_dxf(schematic_path, output_path=None, drawing_sheet=None, variant=None, theme=None, black_and_white=False, exclude_drawing_sheet=False, default_font=None, draw_hop_over=False, pages=None)`
+- `create_project(project_name, project_dir=None)`
+
+Example export calls:
+
+```python
+export_bom("example.kicad_sch", output_path="out/bom.csv")
+export_pdf("example.kicad_sch", output_path="out/schematic.pdf")
+export_svg("example.kicad_sch", output_path="out/schematic.svg")
+```
+
+Example project creation:
+
+```python
+create_project("MyBoard", project_dir="/tmp/my-board")
+```
 
 ## Installing kicad-cli
 
