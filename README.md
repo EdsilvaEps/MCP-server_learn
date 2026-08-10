@@ -6,11 +6,8 @@ This repository is a collection of Model Context Protocol (MCP) server implement
 
 This repository contains several independent MCP server implementations:
 
-### [KiCad ERC MCP Server](./kicad_mcp)
-A specialized server that integrates AI with electronic design automation (EDA). It allows AI agents to perform **Electrical Rules Checks (ERC)** on KiCad schematics.
-- **Key Feature:** Shells out to `kicad-cli sch erc` to validate schematics.
-- **Capabilities:** Validates file paths, captures ERC reports, and normalizes findings into structured JSON (errors, warnings, and summaries).
-- **Ideal for:** Hardware engineers wanting to automate schematic validation via an AI assistant.
+### [KiCad MCP Server](./kicad_mcp)
+Provides ERC checks and export commands (3D PDF, drill, Gerber, etc.) for KiCad schematics and PCBs.
 
 ### [GNews API MCP Server](./news_mcp_server)
 A server that provides real-time access to global news via the [GNews API](https://gnews.io/).
