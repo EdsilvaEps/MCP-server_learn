@@ -11,21 +11,23 @@ git rev-parse --is-inside-work-tree >/dev/null || {
     exit 1
 }
 git checkout -b "$BRANCH"               # creates a fresh branch
-git status --short | grep . && {
-    echo "⚠️  Working tree not clean – commit or stash first"
-    exit 1
-}
+#git status --short | grep . && {
+#    echo "⚠️  Working tree not clean – commit or stash first"
+#    exit 1
+#}
 
 # ---------------------------------------------------------
 # 1️⃣  Create the folder the generator will write into
 # ---------------------------------------------------------
-mkdir -p test
+#echo "📂  Creating test/ folder for generated code"
+#mkdir -p test
 
 # ---------------------------------------------------------
 # 2️⃣  Helper: start a Hermes process in background and
 #    remember its session id (used by `process` later)
 # ---------------------------------------------------------
 start_hermes() {
+    echo "🚀  Starting Hermes for worktree with prompt: $2"
     # $1 = worktree name, $2 = prompt (quoted)
     local wt="$1" prompt="$2"
     # `--continue` tells the new process to inherit the current session’s
@@ -35,15 +37,18 @@ start_hermes() {
     # (the `-q` shortcut).  The process will terminate when the answer
     # is printed.
     hermes \
-        --worktree "$wt" \
+    #    -w "$wt" \
+        --worktree \
+        chat -q \
         --continue \
-        chat -q "$prompt" &
+        "$prompt" &
     echo "$!"   # PID of the background hermes process
 }
 
 # ---------------------------------------------------------
 # 3️⃣  First iteration – generate the file
 # ---------------------------------------------------------
+echo "📝  Generating test/feature.py"
 GEN_PID=$(start_hermes \
     "adversarial-loop-generator" \
     "Generate a new Python module \`test/feature.py\` that defines a class \`Feature\` with a \`run()\` method. Do not import anything external." )
