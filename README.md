@@ -4,6 +4,12 @@ This repository is a collection of Model Context Protocol (MCP) server implement
 
 ## Subprojects
 
+### KiCad Agent Workflow
+
+The `kicad_agent/AGENTS.md` file defines a set of guidelines and fallback strategies for working with KiCad MCP tools. Following these guidelines helps improve the reliability and automation of MCP tasks when developing KiCad‑based workflows.
+
+<img src="pics/circut.png" width="500">
+
 This repository contains several independent MCP server implementations:
 
 ### [KiCad MCP Server](./kicad_mcp)
@@ -17,7 +23,6 @@ A server that provides real-time access to global news via the [GNews API](https
 
 ### 🧪 [Mock MCP Server](./mock_mcp_server)
 A lightweight mock server used for testing and development of MCP clients without needing external APIs or heavy dependencies.
-
 ---
 
 ## What is MCP?
