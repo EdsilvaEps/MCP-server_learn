@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# hermes with branches and worktrees: https://hermes-agent.nousresearch.com/docs/user-guide/git-worktrees/ 
+
 # ---------------------------------------------------------
-# 0️⃣  Sanity checks
+# Sanity checks
 # ---------------------------------------------------------
 REPO_ROOT="$(pwd)"
 BRANCH="adversarial-loop"
@@ -10,27 +12,34 @@ git rev-parse --is-inside-work-tree >/dev/null || {
     echo "❌ Not inside a git repo"
     exit 1
 }
-git checkout -b "$BRANCH"               # creates a fresh branch
-#git status --short | grep . && {
-#    echo "⚠️  Working tree not clean – commit or stash first"
-#    exit 1
-#}
+git checkout -b "$BRANCH" || true               # creates a fresh branch
+
+# -----------------------------------------------------------------
+# Is the repo empty (no commits yet)?
+# -----------------------------------------------------------------
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "✅ Repository already has commits – proceeding."
+else
+    echo "⚠️  Repository is empty – creating an initial empty commit."
+    # Create an orphan branch (no parent) and add a dummy commit.
+    # `--allow-empty` lets us commit without any files.
+    git checkout --orphan "$BRANCH"
+    git commit --allow-empty -m "Initial empty commit for $BRANCH"
+fi
+
+
+#---------------------------------------------------------
+# Create worktrees for generator, critic, and refiner
+#---------------------------------------------------------
+
+git worktree add -b generator ../adversarial-loop-generator || true
+git worktree add -b critic    ../adversarial-loop-critic    || true
+git worktree add -b refiner     ../adversarial-loop-refine    || true
+
 
 # ---------------------------------------------------------
-# 1️⃣  Create the folder the generator will write into
+# Helper: start hermes silently, capture output
 # ---------------------------------------------------------
-#echo "📂  Creating test/ folder for generated code"
-#mkdir -p test
-
-# ---------------------------------------------------------
-# 2️⃣  Helper: start hermes silently, capture output
-# ---------------------------------------------------------
-# Usage:
-#   pid_and_file=$(start_hermes "your prompt")
-#   # → "12345:/tmp/hermes-out-1689172345.txt"
-#   IFS=: read -r HERMES_PID HERMES_LOG <<<"$pid_and_file"
-#   wait "$HERMES_PID"            # blocks until the process ends
-#   GEN_OUT=$(cat "$HERMES_LOG")  # everything the process printed
 start_hermes() {
     # $1 = prompt string (quoted by the caller)
     local prompt="$1"
@@ -44,7 +53,9 @@ start_hermes() {
     printf "🚀 Starting Hermes (PID will appear after launch)…\n" >&2
     # Run hermes in the background, redirecting **both** streams to $log_file.
     # The trailing '&' puts it in background; $! captures its PID.
-    hermes --worktree chat --continue -q "$prompt" \
+    #hermes --worktree chat --continue -q "$prompt" \ 
+
+    hermes chat -q "$prompt" \
         >"$log_file" 2>&1 &
     local pid=$!
 
@@ -59,12 +70,11 @@ start_hermes() {
 }
 
 # ---------------------------------------------------------
-# 3️⃣  First iteration – generate the file
+# First iteration – generate the file
 # ---------------------------------------------------------
+
+cd "../adversarial-loop-generator" || exit 1
 # ---- launch -------------------------------------------------
-#GEN_INFO=$(start_hermes \
-#    "Generate a new Python module \`test/feature.py\` that defines a class \`Feature\` with a \`run()\` method. Do not import anything external.")
-#IFS=: read -r GEN_PID GEN_LOG <<<"$GEN_INFO"
 start_hermes \
     "Generate a new Python module \`test/feature.py\` that defines a class \`Feature\` with a \`run()\` method. Do not import anything external."
 GEN_PID="$HERMES_PID"
@@ -76,17 +86,23 @@ GEN_OUT=$(cat "$GEN_LOG")          # full stdout+stderr of the run
 echo "🟢  Generator output:"
 printf "%s\n" "$GEN_OUT"
 
+#-----Commit-----------------------------------------------------
+git add test/feature.py
+git commit -m "Initial generation of test/feature.py" || echo "⚠️  Nothing to commit"
+
 # ---------------------------------------------------------
-# 4️⃣  Function: run the critic on the generated file
+# Function: run the critic on the generated file
 # ---------------------------------------------------------
+
 run_critic() {
     start_hermes \
-        "Read \`test/feature.py\`. List any PEP‑8 style problems, missing doc‑strings, or failing unit‑tests. Output a plain‑text report. If everything passes, just output the word \`OK\`."
+        "Read \`test/feature.py\`. List any PEP‑8 style problems, missing doc‑strings, or failing unit‑tests. Generate a markdown file REVIEW.md. If there aren't issues, just output the word \`OK\`."
     local pid="$HERMES_PID"
     local log="$HERMES_LOG"
     wait "$pid"    
     cat "$log"
 }
+
 # ---------------------------------------------------------
 # 5️⃣  Function: run the refiner with a given report
 # ---------------------------------------------------------
@@ -107,34 +123,45 @@ run_refiner() {
 MAX_ITER=3
 for ((i=1; i<=MAX_ITER; i++)); do
     echo "🔎  Critic pass #$i"
-    CRITIC_OUT=$(run_critic)
 
+    cd "../adversarial-loop-critic" || exit 1
+
+    #-----sync the generated code into the critic worktree----------
+    git fetch
+    git merge generator --allow-unrelated-histories -m "Merge generated code for review" || echo "⚠️  Merge failed, continuing anyway"
+
+    CRITIC_OUT=$(run_critic)
     echo "$CRITIC_OUT"
+
     if [[ "$CRITIC_OUT" == *"OK"* ]]; then
         echo "✅  All checks passed on iteration $i"
         break
     fi
 
+    #-----Commit the critic's review--------------------------------
+    git add .
+    git commit -m "Sync generated code for review" || echo "⚠️  Nothing to commit"
+
+    cd "../adversarial-loop-refine" || exit 1
+    #-----sync the generated code into the refiner worktree----------
+    git fetch
+    git merge generator --allow-unrelated-histories -m "Merge generated code for refinement" || echo "⚠️  Merge failed, continuing anyway"
+
     echo "🛠️  Refiner pass #$i"
     REFINER_OUT=$(run_refiner "$CRITIC_OUT")
     echo "$REFINER_OUT"
+
+    #-----Commit the refiner's changes--------------------------------
+    git add test/feature.py
+    git commit -m "Refined test/feature.py based on critic feedback" || echo "⚠️  Nothing to commit"
 done
 
 # ---------------------------------------------------------
 # 7️⃣  Inspect the final work‑tree (optional)
 # ---------------------------------------------------------
-echo "📂  Final file content (in worktree \`adversarial-loop-refine\`):"
-git --work-tree="./.git/worktrees/adversarial-loop-refine" show HEAD:test/feature.py | cat
 
-# ---------------------------------------------------------
-# 8️⃣  Clean‑up helper (run manually if you want to discard)
-# ---------------------------------------------------------
-cleanup() {
-    git worktree remove "./.git/worktrees/adversarial-loop-generator" --force
-    git worktree remove "./.git/worktrees/adversarial-loop-critic"    --force
-    git worktree remove "./.git/worktrees/adversarial-loop-refine"   --force
-    git checkout main
-    git branch -D "$BRANCH"
-}
-# Uncomment to auto‑remove the temporary work‑trees:
-# cleanup
+echo "📂  Final file content (in worktree \`adversarial-loop-refine\`):"
+git --work-tree="../adversarial-loop-refine" show HEAD:test/feature.py | cat || true
+
+# call the cleanup script afterwards
+#bash cleanup.sh
