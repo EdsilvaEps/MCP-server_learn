@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# call cleanup.sh to remove the worktrees and reset the branch
+echo "🧹  Cleaning up worktrees and resetting branch..."
+bash cleanup.sh
+
 # -----------------------------------------------------------------
 # Hermes‑driven micro‑electronics design loop (user‑defined design)
 # -----------------------------------------------------------------
@@ -63,19 +67,29 @@ git worktree add -b refiner   "../adversarial-loop-refine"   || true
 # -----------------------------------------------------------------
 start_hermes() {
     local prompt="$1"
+    # define a boolean argument to control whether to run in design mode or not
+    # this will force hermes to use the kicad_mcp_workflow skill when design_mode is true
+    local design_mode="$2"
     local log_file
     log_file=$(mktemp "/tmp/hermes-out-$(date +%s)-XXXX.txt")
 
     if (( DEBUG )); then
-        echo "📝  Hermes (foreground) – Prompt:"
-        echo "---------------------------------------------------"
-        echo "$prompt"
-        echo "---------------------------------------------------"
-        hermes chat -q "$prompt" | tee "$log_file"
+        if [[ "$design_mode" == "true" ]]; then
+            echo "🚀  Starting Hermes (foreground, design mode)…"
+            hermes -s kicad_mcp_workflow chat -q "$prompt" | tee "$log_file"
+        else
+            echo "🚀  Starting Hermes (foreground)…"
+            hermes chat -q "$prompt" | tee "$log_file"
+        fi
         export HERMES_PID=$$   # fake PID – just to keep the variable set
     else
-        printf "🚀  Starting Hermes (background)…\n" >&2
-        hermes chat -q "$prompt" >"$log_file" 2>&1 &
+        if [[ "$design_mode" == "true" ]]; then
+            printf "🚀  Starting Hermes (background, design mode)…\n" >&2
+            hermes -s kicad_mcp_workflow chat -q "$prompt" >"$log_file" 2>&1 &
+        else
+            printf "🚀  Starting Hermes (background)…\n" >&2
+            hermes chat -q "$prompt" >"$log_file" 2>&1 &
+        fi
         local pid=$!
         export HERMES_PID=$pid
     fi
@@ -84,22 +98,19 @@ start_hermes() {
     printf "%s:%s" "$HERMES_PID" "$log_file"
 }
 
-# -----------------------------------------------------------------
-# 5️⃣  Small wrapper around hermes tool_call that prints the call
-# -----------------------------------------------------------------
-run_tool() {
-    local name="$1"
-    local args_json="$2"
-
-    if (( DEBUG )); then
-        echo "🔧  TOOL CALL → $name"
-        echo "     arguments: $args_json"
+#---------------------------------------------------------
+# 5a️⃣  Helper to read the REVIEW.md file (if it exists)
+#---------------------------------------------------------
+read_review() {
+    # $PROJECT_ROOT is always set to the work‑tree’s project folder
+    local review_path="$PROJECT_ROOT/REVIEW.md"
+    if [[ -f "$review_path" ]]; then
+        cat "$review_path"
+    else
+        # Return an empty string if the file is missing – the refiner
+        # will simply receive nothing and can handle it gracefully.
+        echo ""
     fi
-
-    hermes tool_call \
-        name="$name" \
-        arguments="$args_json" \
-        --quiet 2>/dev/null || true
 }
 
 # ---------------------------------------------------------
@@ -112,7 +123,7 @@ cd "../adversarial-loop-generator" || exit 1
 # 6a️⃣  Fixed project name (you can customise it if you wish)
 # -----------------------------------------------------------------
 PROJECT_NAME="custom_generated_design"
-# Absolute path to the folder where the whole KiCad project will live
+# Absolute path to the folder where the output of the current agent will live
 PROJECT_ROOT="$(pwd)/$PROJECT_NAME"
 mkdir -p "$PROJECT_ROOT"
 
@@ -124,11 +135,9 @@ You are a KiCad‑MCP assistant. Using the internal MCP tools, **create the enti
 
     $PROJECT_ROOT
 
-**Tools you must call (in this order)**
-1. `mcp__kicad_general__create_project` – create a KiCad project at the path above.
-2. Either `mcp__kicad_general__add_schematic_component` **or** `mcp__kicad_general__batch_add_components` – place the components that satisfy the user’s request.
-   *All generated files (schematic, board, netlist, etc.) must be stored inside `$PROJECT_ROOT`.*
-3. (Optional) any additional KiCad tool you think is needed, but **never write outside `$PROJECT_ROOT`**.
+**Guidelines**
+1. create the KiCad project only at the path above.
+2. All generated files (schematic, board, netlist, etc.) must be stored inside `$PROJECT_ROOT`.
 
 **User design request**
 "$USER_DESIGN"
@@ -136,12 +145,13 @@ You are a KiCad‑MCP assistant. Using the internal MCP tools, **create the enti
 **What you should return**
 1. A short, human‑readable summary of what you built (project name, key components, etc.).
 2. One line that starts with **Schematic:** followed by the **absolute** path to the generated `*.kicad_sch` file (which will live somewhere under `$PROJECT_ROOT`).
+3. An SVG or PDF exported file of the schematic (if possible).
 
 Do **not** embed any large dumps or extra explanatory text – the script will parse the lines that start with *Schematic:*.
 EOF
 )
 
-start_hermes "$GEN_PROMPT"
+start_hermes "$GEN_PROMPT" "true"
 GEN_PID=$HERMES_PID
 GEN_LOG=$HERMES_LOG
 
@@ -158,22 +168,30 @@ echo "🟢  Generator finished."
 # 6c️⃣  Locate generated files (no log parsing)
 # ---------------------------------------------------------
 # 1) Schematic
-SCHEMATIC_REL=$(find "$PROJECT_ROOT" -type f -name "*.kicad_sch" -print -quit)
-if [ -z "$SCHEMATIC_REL" ]; then
-    echo "❌  No KiCad schematic (*.kicad_sch) found under $PROJECT_ROOT."
-    exit 1
-fi
-SCHEMATIC_PATH="$(realpath "$SCHEMATIC_REL")"
-echo "🔎  Discovered schematic: $SCHEMATIC_PATH"
+find_schematic() {
+    SCHEMATIC_REL=$(find "$PROJECT_ROOT" -type f -name "*.kicad_sch" -print -quit)
+    if [ -z "$SCHEMATIC_REL" ]; then
+        echo "❌  No KiCad schematic (*.kicad_sch) found under $PROJECT_ROOT."
+        exit 1
+    fi
+    SCHEMATIC_PATH="$(realpath "$SCHEMATIC_REL")"
+    echo "🔎  Discovered schematic: $SCHEMATIC_PATH"
+    
+}
 
-# 2) Board file (needed for ERC)
-BOARD_REL=$(find "$PROJECT_ROOT" -type f -name "*.kicad_pcb" -print -quit)
-if [ -z "$BOARD_REL" ]; then
-    echo "⚠️  No KiCad board (*.kicad_pcb) found yet – ERC will still run on the schematic alone."
-else
-    BOARD_PATH="$(realpath "$BOARD_REL")"
-    echo "🔎  Discovered board: $BOARD_PATH"
-fi
+find_board() {
+    BOARD_REL=$(find "$PROJECT_ROOT" -type f -name "*.kicad_pcb" -print -quit)
+    if [ -z "$BOARD_REL" ]; then
+        echo "⚠️  No KiCad board (*.kicad_pcb) found yet – ERC will still run on the schematic alone."
+    else
+        BOARD_PATH="$(realpath "$BOARD_REL")"
+        echo "🔎  Discovered board: $BOARD_PATH"
+    fi
+}
+
+find_schematic
+find_board
+
 
 # ---------------------------------------------------------
 # 7️⃣  Commit the freshly created project (still inside generator WT)
@@ -186,18 +204,19 @@ git commit -m "Initial generation of KiCad project $PROJECT_NAME" || echo "⚠�
 # ---------------------------------------------------------
 run_critic() {
     echo "🔍  Running KiCad ERC on $SCHEMATIC_PATH"
-    ERC_JSON=$(run_tool "mcp__kicad_general__run_erc" '{"path":"'"$SCHEMATIC_PATH"'"}')
 
     start_hermes \
-"We have run KiCad’s Electrical Rules Check (ERC) on the schematic at \`$SCHEMATIC_PATH\`.
-Below is the raw JSON result from the tool:
+        "Run KiCad’s Electrical Rules Check (ERC) using the mcp__kicad_general__run_erc tool on the schematic at \`$SCHEMATIC_PATH\`.
 
-\`\`\`json
-$ERC_JSON
-\`\`\`
+        Generate a markdown file **REVIEW.md** *inside the same project folder* (\`$PROJECT_ROOT\`) that lists each ERC violation (ignore warnings, consider only errors), explains why it occurs, and proposes a concrete fix (e.g. “add net label VCC to pin 1 of V1”, “connect pin 2 of R2 to GND”, etc.).
+        If the \`violations\` array is empty, *write to REVIEW.md only the exact line**:
 
-Create a markdown file **REVIEW.md** *inside the same project folder* (\`$PROJECT_ROOT\`) that lists each ERC violation, explains why it occurs, and proposes a concrete fix (e.g. “add net label VCC to pin 1 of V1”, “connect pin 2 of R2 to GND”, etc.).
-If the \`violations\` array is empty, simply output the word **OK**."
+        <<ERC-PASS>>
+
+        and nothing else.
+        If there are violations, just produce the normal markdown review." \
+        "false" # design mode is false for the critic, since we are not generating new design files, just reviewing
+
     local pid=$HERMES_PID
     local log=$HERMES_LOG
     wait "$pid"
@@ -213,10 +232,11 @@ run_refiner() {
     start_hermes \
 "Using the KiCad MCP toolset, fix the ERC issues reported below **inside the existing project folder** \`$PROJECT_ROOT\`.
 Do **not** change the intended topology; only apply the concrete edits listed in the report (add net‑labels, connect missing pins, delete orphan wires, etc.).
+At the end of the process, generate an SVG or PDF exported file of the updated schematic and save it in the same project folder.
 
 ---Report---
 $report
----End of report---"
+---End of report---" "true"
     local pid=$HERMES_PID
     local log=$HERMES_LOG
     wait "$pid"
@@ -233,15 +253,29 @@ for ((i=1; i<=MAX_ITER; i++)); do
     echo "─────────────────────────────────────────────"
 
     cd "../adversarial-loop-critic" || exit 1
+
     git fetch
     git merge generator --allow-unrelated-histories \
         -m "Merge generated KiCad project for ERC review" || \
         echo "⚠️  Merge failed, continuing anyway"
 
+    # change project root to the critic worktree so that ERC runs in the correct context
+    PROJECT_ROOT="$(pwd)/$PROJECT_NAME"
+    find_schematic
+    find_board
+
+    # Remove any existing REVIEW.md so that the critic will always generate a fresh one
+    rm -f "$PROJECT_ROOT/REVIEW.md" || true
+
     CRITIC_OUT=$(run_critic)
+    echo "📝  ERC review output:"
     echo "$CRITIC_OUT"
 
-    if [[ "$CRITIC_OUT" == *"OK"* ]]; then
+    REVIEW_CONTENT=$(read_review) # puting this in a variable so that it can be passed to the refiner
+
+    # Check if the ERC passed (i.e., REVIEW.md contains the special line)
+    # Look for the first occurrence of <<ERC-PASS>> anywhere in the review content
+    if grep -m1 -F "<<ERC-PASS>>" <<<"$REVIEW_CONTENT" > /dev/null; then
         echo "✅  ERC passed on iteration $i"
         break
     fi
@@ -259,7 +293,13 @@ for ((i=1; i<=MAX_ITER; i++)); do
     echo "─────────────────────────────────────────────"
     echo "🛠️  Refiner pass #$i"
     echo "─────────────────────────────────────────────"
-    REFINER_OUT=$(run_refiner "$CRITIC_OUT")
+
+    # change project root to the refiner worktree so that edits are applied in the correct context
+    PROJECT_ROOT="$(pwd)/$PROJECT_NAME"
+    find_schematic
+    find_board
+
+    REFINER_OUT=$(run_refiner "$REVIEW_CONTENT")
     echo "$REFINER_OUT"
 
     git add "$PROJECT_NAME"
@@ -272,7 +312,7 @@ done
 # ---------------------------------------------------------
 echo "📂  Final schematic content (in worktree \`adversarial-loop-refine\`):"
 git --work-tree="../adversarial-loop-refine" \
-    show HEAD:"$PROJECT_NAME/design/voltage_divider.kicad_sch" | cat || true
+    show HEAD:"$PROJECT_NAME" | cat || true
 
 # ---------------------------------------------------------
 # 1️⃣2️⃣  List the project files that now exist under the generator WT
@@ -281,20 +321,23 @@ echo "📁  Project folder contents (still inside $PROJECT_ROOT):"
 find "$PROJECT_ROOT" -type f -or -type d | sed "s|^$PROJECT_ROOT/||"
 
 # ---------------------------------------------------------
-# 1️⃣3️⃣  Clean‑up helper (run manually or uncomment)
+# 12️⃣  Final merge & commit (repo root)
 # ---------------------------------------------------------
-cleanup() {
-    echo "🧹 Cleaning up work‑trees and temporary branches…"
-    git worktree remove "../adversarial-loop-generator" --force
-    git worktree remove "../adversarial-loop-critic"    --force
-    git worktree remove "../adversarial-loop-refine"   --force
+# Return to the repository root
+cd "$REPO_ROOT" || exit 1
 
-    for br in generator critic refiner; do
-        git branch -D "$br" 2>/dev/null || true
-    done
+# Ensure we are on the adversarial-loop branch
+git checkout "$BRANCH"
 
-    git checkout main
-    git branch -D "$BRANCH" 2>/dev/null || true
-}
-# Uncomment to auto‑clean after a successful run:
-# cleanup
+# Merge the three work‑trees back into the branch
+git merge --no-ff "../adversarial-loop-generator" -m "Merge generated KiCad project"   || echo "⚠️  Merge generator failed"
+git merge --no-ff "../adversarial-loop-critic"    -m "Merge ERC review"              || echo "⚠️  Merge critic failed"
+git merge --no-ff "../adversarial-loop-refine"    -m "Merge refined KiCad design"     || echo "⚠️  Merge refiner failed"
+
+# Commit any outstanding changes (e.g. REVIEW.md updates)
+git add .
+git commit -m "Final adversarial-loop design – ERC passed" || echo "⚠️  Nothing new to commit"
+
+
+#  To clean after a successful run:
+# ./cleanup.sh
