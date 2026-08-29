@@ -33,7 +33,9 @@ import os
 import base64
 import datetime
 from pathlib import Path
-from typing import List, Dict
+import shutil
+from typing import List, Dict, Generator
+
 
 import gradio as gr
 
@@ -58,73 +60,97 @@ def _write_placeholder_png(path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # Mock backend – in a real system this would call the LLM and KiCad tools.
-# ---------------------------------------------------------------------------
-def generate_circuit(
+def generate_circuit_stream(
     prompt: str,
     model: str,
     complexity: str,
     generate_bom: bool,
     generate_pcb: bool,
-) -> Dict:
-    """Generate a circuit design by invoking the external script.
+) -> "Generator[tuple[str, list[str], list[str], str, str], None, None]":
+    """Stream results while the design script runs.
 
-    The function calls the system‑wide ``adversarial_electronics.sh`` script,
-    passing the user's *prompt* as a command‑line argument. The script creates
-    design artifacts under ``../../adversarial-loop-generator/custom_generated_design``
-    relative to this file. This implementation gathers the resulting files and
-    any generated PNG images, returning them for the UI.
+    This function mirrors ``generate_circuit`` but yields intermediate UI updates
+    after each polling interval. The UI can consume the generator with
+    ``stream=True`` so images/files appear as soon as they are written.
 
     Args:
-        prompt: Natural‑language description of the desired circuit.
-        model: Ignored – the script determines the model internally.
-        complexity: Ignored – the script determines complexity internally.
-        generate_bom: Ignored – BOM generation is handled by the script.
-        generate_pcb: Ignored – PCB generation is handled by the script.
+        prompt, model, complexity, generate_bom, generate_pcb – same as
+        :func:`generate_circuit`.
 
-    Returns:
-        Mapping with keys ``llm_output``, ``images``, ``files``, ``logs`` and
-        ``status`` matching the UI specification.
+    Yields:
+        A ``tuple`` matching the Gradio output order:
+        ``(llm_output, images, files, logs, status)``. ``status`` is ``"running"``
+        while the script is active and becomes ``"complete"`` or ``"failed"``
+        on termination.
     """
     import subprocess
-    import shlex
-    # Resolve the target directory where the script will place its output.
-    # This matches the script's internal relative path "../adversarial-loop-generator".
-    target_dir = Path(__file__).resolve().parent.parent / "adversarial-loop-generator" / "custom_generated_design"
-    # Ensure the directory exists before invoking the script (the script may clean it).
+    import threading
+    import time
+    # Resolve the target output directory within the UI app folder (so Gradio can serve the files).
+    target_dir = Path(__file__).resolve().parent / "generated" / "custom_generated_design"
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve the script location (it is not guaranteed to be on $PATH).
     script_path = Path(__file__).resolve().parent.parent / "back_frontend_stability_agent" / "adversarial_electronics.sh"
-    # Build the command – invoke via bash to ensure execution.
-    cmd = ["bash", str(script_path), " -d ",prompt]
-    # Run the script, capturing stdout and stderr for logs.
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
-    logs = proc.stdout + ("\n" if proc.stdout and proc.stderr else "") + proc.stderr
+    cmd = ["bash", str(script_path), "-d", prompt]
 
-    # After execution, collect all files generated in the target directory.
-    # Images are any PNG files; other artifacts are returned as generic files.
-    images = []
-    files = []
-    if target_dir.is_dir():
-        for p in sorted(target_dir.rglob("*")):
-            if p.is_file():
-                if p.suffix.lower() == ".svg":
-                    images.append(str(p))
-                else:
-                    files.append(str(p))
+    result = {"logs": "", "returncode": None}
+    def _run():
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(Path(__file__).resolve().parent.parent),
+                timeout=360,
+            )
+            result["logs"] = proc.stdout + ("\n" if proc.stdout and proc.stderr else "") + proc.stderr
+            result["returncode"] = proc.returncode
+        except subprocess.TimeoutExpired as e:
+            stdout = e.stdout.decode(errors="ignore") if isinstance(e.stdout, (bytes, bytearray)) else (e.stdout or "")
+            stderr = e.stderr.decode(errors="ignore") if isinstance(e.stderr, (bytes, bytearray)) else (e.stderr or "")
+            result["logs"] = stdout + ("\n" if stdout and stderr else "") + stderr + "\n[Timeout after 360\u202fseconds]"
+            result["returncode"] = -1
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
 
-    # Simple textual output indicating success.
+    seen = set()
+    images: List[str] = []
+    files: List[str] = []
     llm_output = f"**Design request**: {prompt}\n\nDesign generated by ``adversarial_electronics.sh``."
+    # Initial empty result
+    src_dir = Path(__file__).resolve().parent.parent / "back_frontend_stability_agent" / "generated" / "custom_generated_design"
+    # Poll loop: while script runs, collect new files from the script's generated folder and copy them into the UI's target_dir.
+    while thread.is_alive():
+        if src_dir.is_dir():
+            for p in sorted(src_dir.rglob("*")):
+                if p.is_file() and str(p) not in seen:
+                    seen.add(str(p))
+                    # Copy into UI's generated folder
+                    dest = target_dir / p.name
+                    shutil.copy2(p, dest)
+                    if p.suffix.lower() == ".svg":
+                        images.append(str(dest))
+                    else:
+                        files.append(str(dest))
+        # Filter out temporary lock files that may appear.
+        files = [f for f in files if Path(f).exists() and not Path(f).name.startswith('~')]
+        yield (llm_output, list(images), list(files), result["logs"], "running")
+        time.sleep(0.5)
+    # Final scan after thread ends.
+    if src_dir.is_dir():
+        for p in sorted(src_dir.rglob("*")):
+            if p.is_file() and str(p) not in seen:
+                seen.add(str(p))
+                dest = target_dir / p.name
+                shutil.copy2(p, dest)
+                if p.suffix.lower() == ".svg":
+                    images.append(str(dest))
+                else:
+                    files.append(str(dest))
+    files = [f for f in files if Path(f).exists() and not Path(f).name.startswith('~')]
+    status = "complete" if result["returncode"] == 0 else "failed"
+    yield (llm_output, list(images), list(files), result["logs"], status)
 
-    status = "complete" if proc.returncode == 0 else "failed"
-
-    return {
-        "llm_output": llm_output,
-        "images": images,
-        "files": files,
-        "logs": logs,
-        "status": status,
-    }
 
 # ---------------------------------------------------------------------------
 # Gradio UI definition.
@@ -172,34 +198,8 @@ with gr.Blocks(title="KiCad Design Assistant (PoC)") as demo:
     # -----------------------------------------------------------------------
     # Callback wiring
     # -----------------------------------------------------------------------
-    def _on_generate(
-        prompt: str,
-        model: str,
-        complexity: str,
-        gen_bom: bool,
-        gen_pcb: bool,
-    ):
-        if not prompt.strip():
-            return (
-                "**Error:** Please describe a circuit.",
-                [],
-                [],
-                "No prompt supplied.",
-                "failed",
-            )
-        result = generate_circuit(prompt, model, complexity, gen_bom, gen_pcb)
-        # Gradio expects the exact ordering of output components.
-        return (
-            result["llm_output"],
-            result["images"],
-            result["files"],
-            result["logs"],
-            result["status"],
-        )
-
-    # Bind inputs and outputs – note the order matches the return tuple.
     generate_btn.click(
-        fn=_on_generate,
+        fn=generate_circuit_stream,
         inputs=[
             circuit_input,
             model_dropdown,
@@ -214,7 +214,9 @@ with gr.Blocks(title="KiCad Design Assistant (PoC)") as demo:
             log_box,
             status_md,
         ],
+        queue=True,
     )
+
 
 # ---------------------------------------------------------------------------
 # Entry point
